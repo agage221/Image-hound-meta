@@ -1,0 +1,9 @@
+# Instagram accounts this repo can post to. Each token lives in a GitHub secret
+# named by token_secret (never commit a token). user_id is optional; it is looked
+# up from the token when missing.
+default: imagehound
+accounts:
+  imagehound:
+    token_secret: IG_TOKEN_IMAGEHOUND
+  # mgi:
+  #   token_secret: IG_TOKEN_MGI
