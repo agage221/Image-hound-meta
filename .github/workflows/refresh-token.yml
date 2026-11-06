@@ -1,0 +1,36 @@
+name: Refresh Instagram tokens
+# Long-lived Instagram tokens expire after 60 days unless refreshed.
+# Needs a GH_PAT secret (fine-grained token for this repo with "Secrets: read and write")
+# so the refreshed token can be saved back to the repo's secrets.
+on:
+  schedule:
+    - cron: "41 13 * * 1"   # Mondays
+  workflow_dispatch:
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Refresh and save
+        env:
+          IG_TOKEN_IMAGEHOUND: ${{ secrets.IG_TOKEN_IMAGEHOUND }}
+          IG_TOKEN_MGI: ${{ secrets.IG_TOKEN_MGI }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          status=0
+          for pair in imagehound:IG_TOKEN_IMAGEHOUND mgi:IG_TOKEN_MGI; do
+            name=${pair%%:*}; secret=${pair##*:}
+            if [ -z "${!secret}" ]; then echo "$name: no token, skipped"; continue; fi
+            if ! new=$(igmeta refresh-token "$name"); then status=1; continue; fi
+            echo "::add-mask::$new"
+            if [ -n "$GH_TOKEN" ]; then
+              gh secret set "$secret" --body "$new" --repo "$GITHUB_REPOSITORY" && echo "$name: saved"
+            else
+              echo "::warning::GH_PAT not set, so the refreshed $name token was not saved."
+            fi
+          done
+          exit $status

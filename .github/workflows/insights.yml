@@ -1,0 +1,40 @@
+name: Pull insights
+on:
+  schedule:
+    - cron: "17 11 * * *"   # daily, ~6am Eastern
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  insights:
+    runs-on: ubuntu-latest
+    env:
+      IG_TOKEN_IMAGEHOUND: ${{ secrets.IG_TOKEN_IMAGEHOUND }}
+      IG_TOKEN_MGI: ${{ secrets.IG_TOKEN_MGI }}
+      # This repo is public, so insights are saved to a private repo instead:
+      # set INSIGHTS_REPO (variable, e.g. agage221/misc-data-archive) and
+      # INSIGHTS_TOKEN (secret, a token that can push to it).
+      INSIGHTS_REPO: ${{ vars.INSIGHTS_REPO }}
+      INSIGHTS_TOKEN: ${{ secrets.INSIGHTS_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Pull and save
+        run: |
+          if [ -n "$INSIGHTS_REPO" ] && [ -n "$INSIGHTS_TOKEN" ]; then
+            git clone -q --depth 1 "https://x-access-token:${INSIGHTS_TOKEN}@github.com/${INSIGHTS_REPO}" store
+            igmeta insights --out store/instagram
+            cd store
+            git add instagram
+            if git diff --cached --quiet; then exit 0; fi
+            git config user.name "image-hound-bot"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -qm "Instagram insights $(date -u +%F)"
+            git push -q
+          else
+            echo "::warning::INSIGHTS_REPO / INSIGHTS_TOKEN not set; pulling without saving."
+            igmeta insights --out /tmp/insights
+          fi

@@ -1,0 +1,47 @@
+name: Publish due posts
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"   # every 15 minutes (GitHub may run a few minutes late)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Show what would post, without posting"
+        type: boolean
+        default: true
+      only:
+        description: "Only this post folder (optional)"
+        required: false
+permissions:
+  contents: write
+concurrency:
+  group: publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - name: Publish
+        env:
+          IG_TOKEN_IMAGEHOUND: ${{ secrets.IG_TOKEN_IMAGEHOUND }}
+          IG_TOKEN_MGI: ${{ secrets.IG_TOKEN_MGI }}
+          MEDIA_BASE_URL: ${{ vars.MEDIA_BASE_URL }}
+        run: |
+          args=()
+          if [ "${{ inputs.dry_run }}" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "${{ inputs.only }}" ]; then args+=(--only "${{ inputs.only }}"); fi
+          igmeta publish "${args[@]}"
+      - name: Save what was posted
+        if: always()
+        run: |
+          git add posts/*/status.json 2>/dev/null || true
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name "image-hound-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Record published posts [skip ci]"
+          for i in 1 2 3; do git pull --rebase -q && git push -q && exit 0; sleep 5; done
+          exit 1
