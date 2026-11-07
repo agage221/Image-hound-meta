@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,28 +45,3 @@ def load_config(root: Path) -> Config:
         )
     default = spec.get("default") or (next(iter(accounts)) if len(accounts) == 1 else None)
     return Config(root=root, accounts=accounts, default=default)
-
-
-def media_url(root: Path, file: Path) -> str:
-    """A public URL Meta can fetch the file from.
-
-    MEDIA_BASE_URL wins if set (e.g. a public storage bucket that mirrors posts/).
-    Otherwise use raw.githubusercontent.com pinned to the current commit, which works
-    because this repo is public and the media is committed before it is published.
-    """
-    rel = file.resolve().relative_to(root.resolve()).as_posix()
-    base = os.environ.get("MEDIA_BASE_URL")
-    if base:
-        return f"{base.rstrip('/')}/{rel}"
-    repo = os.environ.get("GITHUB_REPOSITORY") or _repo_from_remote(root)
-    sha = os.environ.get("MEDIA_SHA") or subprocess.run(
-        ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    return f"https://raw.githubusercontent.com/{repo}/{sha}/{rel}"
-
-
-def _repo_from_remote(root: Path) -> str:
-    url = subprocess.run(["git", "-C", str(root), "remote", "get-url", "origin"],
-                         capture_output=True, text=True, check=True).stdout.strip()
-    url = url.removesuffix(".git")
-    return "/".join(url.replace(":", "/").split("/")[-2:])

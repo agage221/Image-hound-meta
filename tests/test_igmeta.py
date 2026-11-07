@@ -7,8 +7,9 @@ import pytest
 from PIL import Image
 
 from igmeta import insights
-from igmeta.config import load_config, media_url
+from igmeta.config import load_config
 from igmeta.graph import Graph, GraphError
+from igmeta.media import MediaError, MediaStore
 from igmeta.publish import publish_post
 from igmeta.queue import load_post, load_queue, parse_time, prepare, validate
 
@@ -93,7 +94,36 @@ def make_post(tmp: Path, slug="2026-11-10-test", files=("01.jpg",), spec="", siz
     return folder
 
 
-URL = lambda f: f"https://example.com/{f.name}"
+class FakeStore:
+    """Storage holding whatever is in `remote` ({(slug, name): bytes}); by default it mirrors
+    the local post folders, i.e. everything counts as uploaded."""
+
+    def __init__(self, remote=None, mirror_local=True, root=None):
+        self.remote = remote or {}
+        self.mirror_local = mirror_local
+        self.root = root
+
+    def url(self, slug, name):
+        return f"https://example.com/{slug}/{name}"
+
+    def _get(self, slug, name):
+        if (slug, name) in self.remote:
+            return self.remote[(slug, name)]
+        if self.mirror_local and self.root:
+            f = self.root / "posts" / slug / name
+            return f.read_bytes() if f.exists() else None
+        return None
+
+    def fetch(self, slug, name):
+        return self._get(slug, name)
+
+    def size(self, slug, name):
+        data = self._get(slug, name)
+        return None if data is None else len(data)
+
+
+def store_for(tmp):
+    return FakeStore(root=tmp)
 NOW = datetime(2026, 11, 11, tzinfo=timezone.utc)
 
 
@@ -173,11 +203,11 @@ def test_prepare_converts_png_and_keeps_yaml(tmp_path):
 def test_publish_single_image(tmp_path):
     fake = FakeMeta()
     post = load_post(make_post(tmp_path))
-    result = publish_post(graph_for(fake), post, URL)
+    result = publish_post(graph_for(fake), post, store_for(tmp_path))
     assert result["status"] == "published"
     assert result["permalink"] == "https://www.instagram.com/p/X/"
     created = [c for c in fake.calls if c[0] == "POST" and c[1].endswith("/media")]
-    assert created[0][2]["image_url"] == "https://example.com/01.jpg"
+    assert created[0][2]["image_url"] == "https://example.com/2026-11-10-test/01.jpg"
     assert created[0][2]["caption"] == "Hello there"
     saved = json.loads((post.folder / "status.json").read_text())
     assert saved["media_id"] == "m99"
@@ -187,7 +217,7 @@ def test_publish_single_image(tmp_path):
 def test_publish_carousel(tmp_path):
     fake = FakeMeta()
     post = load_post(make_post(tmp_path, files=("01.jpg", "02.jpg", "03.jpg")))
-    assert publish_post(graph_for(fake), post, URL)["status"] == "published"
+    assert publish_post(graph_for(fake), post, store_for(tmp_path))["status"] == "published"
     created = [c[2] for c in fake.calls if c[0] == "POST" and c[1].endswith("/media")]
     assert [c.get("is_carousel_item") for c in created[:3]] == ["true"] * 3
     assert "caption" not in created[0]
@@ -199,7 +229,7 @@ def test_publish_carousel(tmp_path):
 def test_publish_story_drops_caption(tmp_path):
     fake = FakeMeta()
     post = load_post(make_post(tmp_path, sizes={"01.jpg": (1080, 1920)}, spec="type: story\n"))
-    assert publish_post(graph_for(fake), post, URL)["status"] == "published"
+    assert publish_post(graph_for(fake), post, store_for(tmp_path))["status"] == "published"
     created = [c[2] for c in fake.calls if c[0] == "POST" and c[1].endswith("/media")][0]
     assert created["media_type"] == "STORIES" and "caption" not in created
 
@@ -207,13 +237,13 @@ def test_publish_story_drops_caption(tmp_path):
 def test_waits_for_container(tmp_path):
     fake = FakeMeta(status_seq=["IN_PROGRESS", "IN_PROGRESS", "FINISHED"])
     post = load_post(make_post(tmp_path))
-    assert publish_post(graph_for(fake), post, URL)["status"] == "published"
+    assert publish_post(graph_for(fake), post, store_for(tmp_path))["status"] == "published"
 
 
 def test_container_error_is_recorded(tmp_path):
     fake = FakeMeta(status_seq=["ERROR"])
     post = load_post(make_post(tmp_path))
-    result = publish_post(graph_for(fake), post, URL, now=lambda: NOW)
+    result = publish_post(graph_for(fake), post, store_for(tmp_path), now=lambda: NOW)
     assert result["status"] == "failed" and result["attempts"] == 1
     assert load_post(post.folder).is_due(NOW)  # retried next run
 
@@ -222,7 +252,7 @@ def test_gives_up_after_three_failures(tmp_path):
     fake = FakeMeta(fail_publish=True)
     folder = make_post(tmp_path)
     for _ in range(3):
-        publish_post(graph_for(fake), load_post(folder), URL, now=lambda: NOW)
+        publish_post(graph_for(fake), load_post(folder), store_for(tmp_path), now=lambda: NOW)
     post = load_post(folder)
     assert post.status["attempts"] == 3 and "Media upload failed" in post.status["error"]
     assert not post.is_due(NOW)
@@ -232,7 +262,7 @@ def test_never_posts_twice(tmp_path):
     fake = FakeMeta(recent=[{"id": "old1", "caption": "Hello   there\n",
                              "permalink": "https://www.instagram.com/p/OLD/"}])
     post = load_post(make_post(tmp_path))
-    result = publish_post(graph_for(fake), post, URL)
+    result = publish_post(graph_for(fake), post, store_for(tmp_path))
     assert result["status"] == "published" and result["media_id"] == "old1"
     assert not any(c[1].endswith("/media_publish") for c in fake.calls)
 
@@ -240,7 +270,7 @@ def test_never_posts_twice(tmp_path):
 def test_dry_run_calls_nothing(tmp_path):
     fake = FakeMeta()
     post = load_post(make_post(tmp_path, files=("01.jpg", "02.jpg")))
-    result = publish_post(graph_for(fake), post, URL, dry_run=True)
+    result = publish_post(graph_for(fake), post, store_for(tmp_path), dry_run=True)
     assert result["status"] == "dry-run" and len(result["urls"]) == 2
     assert fake.calls == [] and not (post.folder / "status.json").exists()
 
@@ -248,7 +278,7 @@ def test_dry_run_calls_nothing(tmp_path):
 def test_invalid_post_not_sent(tmp_path):
     fake = FakeMeta()
     post = load_post(make_post(tmp_path, files=("01.png",)))
-    assert publish_post(graph_for(fake), post, URL)["status"] == "failed"
+    assert publish_post(graph_for(fake), post, store_for(tmp_path))["status"] == "failed"
     assert fake.calls == []
 
 
@@ -286,7 +316,7 @@ def test_insights_pull_appends(tmp_path):
     assert len(acct) == 3 and acct[1].startswith("2026-11-09,imagehound,42,3")
 
 
-def test_config_and_media_url(tmp_path, monkeypatch):
+def test_config(tmp_path, monkeypatch):
     (tmp_path / "accounts.yml").write_text(
         "accounts:\n  imagehound:\n    token_secret: TOK_A\n  mgi: {}\n")
     cfg = load_config(tmp_path)
@@ -294,12 +324,96 @@ def test_config_and_media_url(tmp_path, monkeypatch):
     assert cfg.account("mgi").token_secret == "IG_TOKEN_MGI"
     monkeypatch.setenv("TOK_A", "abc")
     assert cfg.account("imagehound").token == "abc"
-    f = tmp_path / "posts" / "x" / "01.jpg"
-    f.parent.mkdir(parents=True)
-    f.write_bytes(b"")
-    monkeypatch.setenv("GITHUB_REPOSITORY", "agage221/image-hound-meta")
-    monkeypatch.setenv("MEDIA_SHA", "abc123")
-    assert media_url(tmp_path, f) == \
-        "https://raw.githubusercontent.com/agage221/image-hound-meta/abc123/posts/x/01.jpg"
-    monkeypatch.setenv("MEDIA_BASE_URL", "https://cdn.example.com/ig/")
-    assert media_url(tmp_path, f) == "https://cdn.example.com/ig/posts/x/01.jpg"
+
+
+# -- storage-only media ------------------------------------------------------
+
+def remote_post(tmp: Path, slug="2026-11-12-remote", files=("01.jpg", "02.jpg")) -> Path:
+    folder = tmp / "posts" / slug
+    folder.mkdir(parents=True)
+    (folder / "post.yml").write_text(
+        f"account: imagehound\npublish_at: 2026-11-10 09:30\nmedia: [{', '.join(files)}]\n"
+        "caption: From storage\n")
+    return folder
+
+
+def jpeg_bytes(size=(1080, 1350)) -> bytes:
+    import io
+    buf = io.BytesIO()
+    Image.new("RGB", size).save(buf, "JPEG")
+    return buf.getvalue()
+
+
+def test_validate_reads_from_storage(tmp_path):
+    post = load_post(remote_post(tmp_path))
+    store = FakeStore({(post.slug, "01.jpg"): jpeg_bytes(), (post.slug, "02.jpg"): jpeg_bytes((1080, 1920))})
+    errors, _ = validate(post, store=store)
+    assert errors == ["02.jpg: aspect ratio 1080x1920 is outside 4:5 to 1.91:1"]
+
+
+def test_missing_from_storage(tmp_path):
+    post = load_post(remote_post(tmp_path))
+    errors, _ = validate(post, store=FakeStore({(post.slug, "01.jpg"): jpeg_bytes()}))
+    assert errors == ["02.jpg: not found in storage folder 2026-11-12-remote/"]
+    errors, _ = validate(post)  # no storage at all
+    assert "no storage configured" in errors[0]
+
+
+def test_publish_from_storage_only(tmp_path):
+    fake = FakeMeta()
+    post = load_post(remote_post(tmp_path))
+    store = FakeStore({(post.slug, "01.jpg"): jpeg_bytes(), (post.slug, "02.jpg"): jpeg_bytes()})
+    assert publish_post(graph_for(fake), post, store)["status"] == "published"
+    urls = [c[2]["image_url"] for c in fake.calls if c[0] == "POST" and "image_url" in c[2]]
+    assert urls == [f"https://example.com/{post.slug}/01.jpg", f"https://example.com/{post.slug}/02.jpg"]
+
+
+def test_local_but_not_uploaded_is_blocked(tmp_path):
+    fake = FakeMeta()
+    post = load_post(make_post(tmp_path))
+    result = publish_post(graph_for(fake), post, FakeStore(mirror_local=False))
+    assert result["status"] == "failed" and "not uploaded" in result["error"]
+    assert fake.calls == []
+
+
+def test_no_store_configured(tmp_path):
+    post = load_post(make_post(tmp_path))
+    assert "SUPABASE_URL" in publish_post(graph_for(FakeMeta()), post, None)["error"]
+
+
+def test_supabase_store(tmp_path, monkeypatch):
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, json={"Key": "instagram/x/01.jpg"})
+        if request.url.path.endswith("/missing.jpg"):
+            return httpx.Response(400, json={"error": "not_found"})
+        return httpx.Response(200, content=b"abc", headers={"content-length": "3"})
+
+    monkeypatch.delenv("MEDIA_BASE_URL", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co/")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "secret")
+    store = MediaStore.from_env(client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert store.url("2026-11-10 a", "01.jpg") == \
+        "https://proj.supabase.co/storage/v1/object/public/instagram/2026-11-10%20a/01.jpg"
+    assert store.fetch("x", "01.jpg") == b"abc"
+    assert store.fetch("x", "missing.jpg") is None
+    assert store.size("x", "01.jpg") == 3
+    f = jpg(tmp_path / "01.jpg")
+    store.upload("x", f)
+    up = seen[-1]
+    assert up.url.path == "/storage/v1/object/instagram/x/01.jpg"
+    assert up.headers["authorization"] == "Bearer secret" and up.headers["x-upsert"] == "true"
+    assert up.headers["content-type"] == "image/jpeg"
+
+
+def test_upload_needs_key(tmp_path, monkeypatch):
+    monkeypatch.delenv("SUPABASE_SERVICE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    store = MediaStore.from_env()
+    with pytest.raises(MediaError):
+        store.upload("x", jpg(tmp_path / "01.jpg"))
+    monkeypatch.delenv("SUPABASE_URL")
+    assert MediaStore.from_env() is None
