@@ -3,13 +3,10 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Callable
 
 from .graph import Graph, GraphError
-from .queue import Post, validate
-
-UrlFor = Callable[[Path], str]
+from .queue import VIDEO_EXT, Post, _ext, validate
 
 
 def _norm(text: str | None) -> str:
@@ -27,13 +24,16 @@ def already_posted(graph: Graph, post: Post) -> dict | None:
     return None
 
 
-def build_container(graph: Graph, post: Post, url_for: UrlFor) -> str:
+def build_container(graph: Graph, post: Post, store) -> str:
+    def url_for(name: str) -> str:
+        return store.url(post.slug, name)
+
     caption = post.caption if post.type != "story" else None
     if post.type == "image":
         return graph.create_container(image_url=url_for(post.media[0]), caption=caption)
     if post.type == "story":
         m = post.media[0]
-        if m.suffix.lower() in (".mp4", ".mov"):
+        if _ext(m) in VIDEO_EXT:
             return graph.create_container(media_type="STORIES", video_url=url_for(m))
         return graph.create_container(media_type="STORIES", image_url=url_for(m))
     if post.type == "reel":
@@ -45,7 +45,7 @@ def build_container(graph: Graph, post: Post, url_for: UrlFor) -> str:
     if post.type == "carousel":
         children = []
         for m in post.media:
-            if m.suffix.lower() in (".mp4", ".mov"):
+            if _ext(m) in VIDEO_EXT:
                 cid = graph.create_container(media_type="VIDEO", video_url=url_for(m),
                                              is_carousel_item="true")
             else:
@@ -58,15 +58,28 @@ def build_container(graph: Graph, post: Post, url_for: UrlFor) -> str:
     raise ValueError(f"unknown post type {post.type}")
 
 
-def publish_post(graph: Graph, post: Post, url_for: UrlFor, *, dry_run: bool = False,
+def publish_post(graph: Graph, post: Post, store, *, dry_run: bool = False,
                  now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)) -> dict:
-    errors, _ = validate(post)
+    """Publish one post. `store` gives each file's public URL (and is checked first)."""
+    if store is None:
+        post.save_status(status="failed", attempts=post.status.get("attempts", 0) + 1,
+                         error="no media storage configured (set SUPABASE_URL)",
+                         last_try=now().isoformat())
+        return post.status
+    errors, _ = validate(post, store=store)
+    if not errors:  # files checked locally still have to be in storage for Meta to fetch them
+        try:
+            errors = [f"{n}: not uploaded to storage yet" for n in
+                      post.media + ([post.cover] if post.cover else [])
+                      if store.size(post.slug, n) is None]
+        except Exception as e:
+            errors = [f"couldn't reach storage ({e})"]
     if errors:
         post.save_status(status="failed", attempts=post.status.get("attempts", 0) + 1,
                          error="; ".join(errors), last_try=now().isoformat())
         return post.status
     if dry_run:
-        urls = [url_for(m) for m in post.media]
+        urls = [store.url(post.slug, m) for m in post.media]
         return {"status": "dry-run", "type": post.type, "urls": urls}
 
     existing = already_posted(graph, post)
@@ -77,7 +90,7 @@ def publish_post(graph: Graph, post: Post, url_for: UrlFor, *, dry_run: bool = F
         return post.status
 
     try:
-        container = build_container(graph, post, url_for)
+        container = build_container(graph, post, store)
         graph.wait_until_ready(container, timeout=600 if post.type in ("reel", "story") else 300)
         media_id = graph.publish_container(container)
         info = graph.media(media_id)

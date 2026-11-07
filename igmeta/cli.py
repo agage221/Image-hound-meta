@@ -3,6 +3,7 @@
     igmeta check                 validate every queued post
     igmeta queue                 list what's queued and when
     igmeta prepare               convert PNG/WebP media to JPEG
+    igmeta upload [SLUG]         upload media from post folders to storage
     igmeta publish [--dry-run]   publish everything that's due
     igmeta insights --out DIR    append today's insights snapshots
     igmeta limit                 show today's publishing quota use
@@ -19,8 +20,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import insights as insights_mod
-from .config import load_config, media_url
+from .config import load_config
 from .graph import Graph, GraphError
+from .media import MediaError, MediaStore
 from .publish import publish_post
 from .queue import DEFAULT_TZ, load_queue, prepare, validate
 
@@ -38,11 +40,14 @@ def _graph(cfg, name: str) -> Graph:
 
 def cmd_check(args, cfg) -> int:
     posts = load_queue(cfg.root, cfg.default)
+    store = MediaStore.from_env()
+    if store is None:
+        print("note: no storage configured (SUPABASE_URL); only local files can be checked\n")
     bad = 0
     for p in posts:
         if p.published:
             continue
-        errors, warnings = validate(p, set(cfg.accounts))
+        errors, warnings = validate(p, set(cfg.accounts), store)
         mark = "x" if errors else "ok"
         print(f"[{mark}] {p.slug}  ({p.type}, {len(p.media)} file(s), {_local(p.publish_at)})")
         for e in errors:
@@ -69,6 +74,27 @@ def cmd_prepare(args, cfg) -> int:
     return 0
 
 
+def cmd_upload(args, cfg) -> int:
+    store = MediaStore.from_env()
+    if store is None:
+        print("Set SUPABASE_URL and SUPABASE_SERVICE_KEY first.")
+        return 1
+    failed = 0
+    for p in load_queue(cfg.root, cfg.default):
+        if args.slug and p.slug != args.slug:
+            continue
+        for name in p.media + ([p.cover] if p.cover else []):
+            local = p.local(name)
+            if not local:
+                continue
+            try:
+                print(f"{p.slug}/{name} -> {store.upload(p.slug, local)}")
+            except MediaError as e:
+                print(f"[x] {p.slug}/{name}: {e}")
+                failed += 1
+    return 1 if failed else 0
+
+
 def cmd_publish(args, cfg) -> int:
     now = datetime.now(timezone.utc)
     due = [p for p in load_queue(cfg.root, cfg.default) if p.is_due(now)]
@@ -77,6 +103,7 @@ def cmd_publish(args, cfg) -> int:
     if not due:
         print("Nothing due.")
         return 0
+    store = MediaStore.from_env()
     graphs: dict[str, Graph] = {}
     failed = 0
     for p in due[: args.max]:
@@ -86,7 +113,7 @@ def cmd_publish(args, cfg) -> int:
             print(f"[x] {p.slug}: {e}")
             failed += 1
             continue
-        result = publish_post(g, p, lambda f: media_url(cfg.root, f), dry_run=args.dry_run)
+        result = publish_post(g, p, store, dry_run=args.dry_run)
         state = result.get("status")
         print(f"[{state}] {p.slug} -> {result.get('permalink') or result.get('error') or result.get('urls')}")
         failed += state == "failed"
@@ -150,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check")
     sub.add_parser("queue")
     sub.add_parser("prepare")
+    p = sub.add_parser("upload")
+    p.add_argument("slug", nargs="?")
     p = sub.add_parser("publish")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--only", help="publish just this slug, if it's due")
@@ -164,7 +193,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     cfg = load_config(Path(args.root))
-    handler = {"check": cmd_check, "queue": cmd_queue, "prepare": cmd_prepare,
+    handler = {"check": cmd_check, "queue": cmd_queue, "prepare": cmd_prepare, "upload": cmd_upload,
                "publish": cmd_publish, "insights": cmd_insights, "limit": cmd_limit,
                "whoami": cmd_whoami, "refresh-token": cmd_refresh}[args.cmd]
     return handler(args, cfg)

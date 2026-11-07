@@ -2,4 +2,12 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv/
-insights-out/
+
+# Post media lives in Supabase Storage, never in git. Files dropped into a post
+# folder locally are for `igmeta check` / `igmeta upload` only.
+posts/**/*.jpg
+posts/**/*.jpeg
+posts/**/*.png
+posts/**/*.webp
+posts/**/*.mp4
+posts/**/*.mov

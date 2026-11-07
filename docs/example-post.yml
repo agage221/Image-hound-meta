@@ -1,9 +1,10 @@
-# Copy this folder to queue a post. Folder name = the post's id (e.g. 2026-11-10-jury-award).
+# To queue a post: make posts/<id>/post.yml (e.g. posts/2026-11-10-jury-award/post.yml) and put
+# the images in the Supabase bucket under a folder with the same id (instagram/2026-11-10-jury-award/).
 account: imagehound
 publish_at: 2026-11-10 09:30      # Eastern time unless you add an offset like -05:00
 type: carousel                    # image | carousel | reel | story (guessed from the files if left out)
-media: [01.jpg, 02.jpg]           # order matters; leave out to use every file in name order
-paused: true                      # this example never goes out; delete this line on real posts
+media: [01.jpg, 02.jpg]           # file names in the bucket folder, in posting order
+paused: false                     # true holds the post
 caption: |
   First line is what people see before "more".
 

@@ -14,4 +14,7 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: pytest -q
       - name: Check the post queue
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_BUCKET: ${{ vars.SUPABASE_BUCKET }}
         run: igmeta check
